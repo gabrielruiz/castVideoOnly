@@ -1,14 +1,17 @@
 # castVideoOnly
 
-Send **video-only** to a Chromecast while keeping audio on your computer — ideal for routing audio through Bluetooth headphones/speakers connected to your machine while using a TV or projector as the display.
+Send **video-only** to a Chromecast while keeping audio on your computer —
+ideal for routing audio through Bluetooth headphones/speakers while using a
+TV or projector as the display.
 
-The Chromecast introduces a ~2 s video delay due to internal buffering. The script compensates by delaying the local audio by the same amount, keeping everything in sync.
+The Chromecast introduces a ~2.5 s video delay due to internal buffering.
+The script compensates by delaying the local audio by the same amount.
 
 ## Requirements
 
 - **Python 3.12+**
-- **ffmpeg / ffplay** (system packages)
-- **VLC 3.0+** (with `libvlc`; `python-vlc` bindings are installed in the venv)
+- **ffmpeg / ffprobe** (system packages)
+- **VLC 3.0+** (with `libvlc`; `python-vlc` bindings are in the venv)
 - **pychromecast** (installed in the venv)
 - Chromecast v2 (or any Google Cast device) on the **same network**
 
@@ -34,90 +37,125 @@ python cast_video.py /path/to/video.mp4
 | Argument | Description |
 |----------|-------------|
 | `video_path` | Path to the video file (required) |
-| `-n NAME` | Chromecast device name (default: `Remote`) |
+| `-n NAME` | Chromecast device name (default: `Remoto`) |
 | `-d DELAY` | Audio delay in milliseconds (default: `2500`) |
+| `--fast` | Skip transcoding — instantly remux to MP4 (may not play on CC v2) |
+| `--software` | Force software encoding (slower, but avoids VAAPI issues) |
+| `--ip IP` | Manual LAN IP for the HTTP server (auto-detected if not set) |
+| `-t SEC\|HH:MM:SS` | Start position (default: `0`). Examples: `-t 300` `-t 00:05:00` `-t 01:20:15` |
 
 ### Examples
 
 ```bash
-# Use default name "Remote" with default 2500ms delay
+# Default name "Remoto" with default 2500 ms delay
 python cast_video.py ~/Videos/movie.mp4
 
 # Specify a different Chromecast
 python cast_video.py ~/Videos/movie.mp4 -n "Living Room TV"
 
-# Adjust sync manually (+500ms if audio still lags)
-python cast_video.py ~/Videos/movie.mp4 -d 3000
+# Start at 5 minutes
+python cast_video.py ~/Videos/movie.mp4 -t 00:05:00
 
-# Reduce delay if audio is ahead of video
-python cast_video.py ~/Videos/movie.mp4 -d 2000
+# Faster start (no transcoding — video may not play on CC v2)
+python cast_video.py ~/Videos/movie.mp4 --fast
+
+# Force software encoding if hardware (VAAPI) output causes black screen
+python cast_video.py ~/Videos/movie.mp4 --software
+
+# Specify LAN IP manually (useful when VPN interferes)
+python cast_video.py ~/Videos/movie.mp4 --ip 192.168.0.14
 ```
 
 ## How it works (step by step)
 
-1. **Video extraction** — `ffmpeg` stream-copies the video track and strips audio (`-an -c:v copy`). No re-encoding, so it's near-instant and lossless.
+1. **Video probe** — `ffprobe` reads the codec, resolution, and container. Warns
+   if the format isn't natively supported by Chromecast v2.
 
-2. **Local HTTP server** — A lightweight Python `http.server` on port `8800` serves the video-only file with Range-request support (required by Chromecast for seeking).
+2. **File preparation** — If the codec isn't H.264/VP8/MPEG-4, `ffmpeg`
+   transcodes to H.264 using hardware encoding (VAAPI on Intel iGPU) or
+   software `libx264` (`--software`). A silent AAC audio track is added
+   (Chromecast default receiver may refuse video-only streams). Progress
+   percentage is shown. The `+faststart` flag places the moov atom at the
+   front so the Chromecast can seek.
 
-3. **Chromecast casting** — `pychromecast` discovers your device by name and sends the video URL (`http://<LAN_IP>:8800/video_only.mp4`).
+3. **Local HTTP server** — A threaded HTTP/1.1 server on port `8800` serves
+   the file with Range-request support (required by Chromecast for seeking).
 
-4. **Local audio playback** — VLC plays the original audio track in audio-only mode (`--no-video`). The delay (`DEFAULT_DELAY`, 2500 ms) is applied via `audio_set_delay()`, matching the Chromecast's buffering delay.
+4. **Chromecast casting** — `pychromecast` discovers the device by name and
+   loads the video URL (`http://<LAN_IP>:8800/tmpXXXXXX.mp4`) via the default
+   media receiver.
 
-5. **Interactive control** — A curses-based terminal UI lets you control both players in lockstep.
+5. **Local audio playback** — VLC plays the original file in audio-only mode
+   (`--no-video`). The delay is applied via `audio_set_delay()`, matching the
+   Chromecast's buffering delay.
+
+6. **Interactive control** — A curses-based terminal UI shows positions and
+   accepts keyboard commands.
 
 ## Interactive Controls
-
-Once the script is running, the terminal shows playback status and accepts keyboard commands:
 
 | Key | Action |
 |-----|--------|
 | `Space` | Pause / Resume (both Chromecast + local audio) |
-| `←` | Seek backward 5 seconds |
-| `→` | Seek forward 5 seconds |
+| `←` | Seek backward 5 seconds **(broken — see TODO)** |
+| `→` | Seek forward 5 seconds **(broken — see TODO)** |
 | `q` | Stop playback and clean up |
 
 The UI displays:
 - Current Chromecast video position
-- Current audio position (minus the delay offset) / total audio length
+- Current audio position / total audio length
 - Play/pause status
 
 ## Audio Routing to Bluetooth
 
-No script changes needed. The audio plays through your system's current audio output. To use Bluetooth:
+No script changes needed. The audio plays through your system's current output.
+To use Bluetooth:
 
-1. Connect your Bluetooth speaker/headphones via your system Bluetooth settings.
-2. Set it as the default audio sink (or configure your audio server to route VLC to it).
+1. Connect your Bluetooth speaker/headphones via system settings.
+2. Set it as the default audio sink (or configure your audio server to route
+   VLC to it).
 3. Run the script normally — VLC will output to the active audio device.
-
-On PipeWire/PulseAudio systems you can also move the stream to a specific device on the fly with `pavucontrol` or `pw-top`.
 
 ## Tuning the Delay
 
-The Chromecast's video delay varies depending on your network and the video bitrate. If audio and video drift apart:
+The Chromecast's video delay varies depending on your network and bitrate.
 
 - **Audio heard before video** → increase delay (`-d 3000`, `-d 3500`...)
 - **Audio heard after video** → decrease delay (`-d 2000`, `-d 1500`...)
 
-Start with the default 2500 ms and adjust in 250–500 ms steps until it feels right.
+Start with the default 2500 ms and adjust in 250–500 ms steps.
+
+## Notes
+
+- The script names its Chromecast target **"Remoto"** (change with `-n` or edit
+  `DEFAULT_NAME` in the script).
+- Temp files in `/tmp/tmp*.mp4` older than 30 days are automatically cleaned
+  on each run.
+- When the script exits, it tells the Chromecast to quit the receiver app,
+  stops VLC, shuts down the HTTP server, and deletes the temp file.
 
 ## Troubleshooting
 
 | Problem | Likely fix |
 |---------|------------|
-| `Chromecast 'Remote' not found` | Check Chromecast is on, same network, and name is correct. |
-| `Port 8800 is already in use` | Kill the process using that port or change to a different port in `cast_video.py`. |
-| `ffmpeg failed` | Ensure `ffmpeg` is installed (`ffmpeg -version`). The file format may not be supported. |
-| Audio desyncs after seeking | Chromecast rebuffering varies. Try pausing briefly after seeking to let it stabilize. |
+| `Chromecast 'Remoto' not found` | Check Chromecast is on, same network, and name is correct. |
+| `Port 8800 is already in use` | Kill the process using that port. |
+| `ffmpeg failed` | Ensure `ffmpeg` is installed (`ffmpeg -version`). |
+| Black screen on Chromecast | The file may not be compatible. Try `--software` or `--fast`. If on a VPN, pass `--ip <LAN_IP>`. |
+| Audio out of sync | Adjust with `-d`. Default is 2500 ms. |
+| Seeking jumps to beginning | See TODO below — seek is currently broken. |
+| `Could not detect LAN IP` | Pass `--ip <LAN_IP>` manually (VPN may interfere with auto-detection). |
 
 ## TODO
 
-- **Seeking** (←/→) does not work properly — the Chromecast ignores the seek
+- **Seeking** (`←` / `→`) does not work — the Chromecast ignores the position
   command and restarts the video from the beginning. Audio seeks correctly.
-  Fix this before the next release.
+  Need a reliable seek mechanism.
 
 ## Logs
 
-All errors (including full ffmpeg output) are logged to **`cast.log`** in the project directory. When a failure occurs:
+All errors (including full ffmpeg output) are logged to **`cast.log`** in the
+project directory. When a failure occurs:
 
 1. The terminal shows a brief error and "Press any key to exit"
 2. The full error details are in `cast.log`
@@ -128,19 +166,12 @@ You can also tail the log during a run:
 tail -f cast.log
 ```
 
-## Cleanup
-
-When you press `q` or the video ends, the script:
-- Stops Chromecast playback
-- Stops the local audio player
-- Shuts down the HTTP server
-- Deletes the temporary video-only file
-
 ## Project Structure
 
 ```
 castVideoOnly/
 ├── .venv/           ← Python virtual environment
 ├── cast_video.py    ← Main script
+├── cast.log         ← Runtime log (created automatically)
 └── README.md        ← This file
 ```

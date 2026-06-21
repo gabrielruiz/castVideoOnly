@@ -17,15 +17,15 @@ The Chromecast introduces a ~2 s video delay due to internal buffering. The scri
 ```bash
 git clone <this-repo> castVideoOnly
 cd castVideoOnly
-python3 -m venv .venv                      # or use the existing one
+python3 -m venv .venv
 source .venv/bin/activate
 pip install pychromecast python-vlc
+deactivate          # script auto-detects the venv; no need to activate to run
 ```
 
 ## Usage
 
 ```bash
-source .venv/bin/activate
 python cast_video.py /path/to/video.mp4
 ```
 
@@ -35,22 +35,22 @@ python cast_video.py /path/to/video.mp4
 |----------|-------------|
 | `video_path` | Path to the video file (required) |
 | `-n NAME` | Chromecast device name (default: `Remote`) |
-| `-d DELAY` | Audio delay in milliseconds (default: `2000`) |
+| `-d DELAY` | Audio delay in milliseconds (default: `2500`) |
 
 ### Examples
 
 ```bash
-# Use default name "Remote" with default 2000ms delay
+# Use default name "Remote" with default 2500ms delay
 python cast_video.py ~/Videos/movie.mp4
 
 # Specify a different Chromecast
 python cast_video.py ~/Videos/movie.mp4 -n "Living Room TV"
 
 # Adjust sync manually (+500ms if audio still lags)
-python cast_video.py ~/Videos/movie.mp4 -d 2500
+python cast_video.py ~/Videos/movie.mp4 -d 3000
 
 # Reduce delay if audio is ahead of video
-python cast_video.py ~/Videos/movie.mp4 -d 1500
+python cast_video.py ~/Videos/movie.mp4 -d 2000
 ```
 
 ## How it works (step by step)
@@ -61,7 +61,7 @@ python cast_video.py ~/Videos/movie.mp4 -d 1500
 
 3. **Chromecast casting** — `pychromecast` discovers your device by name and sends the video URL (`http://<LAN_IP>:8800/video_only.mp4`).
 
-4. **Local audio playback** — VLC plays the original audio track in audio-only mode (`--no-video`). The `--delay` value (in ms) is applied via `audio_set_delay()`, which inserts silence at the start — matching the Chromecast's buffering delay.
+4. **Local audio playback** — VLC plays the original audio track in audio-only mode (`--no-video`). The delay (`DEFAULT_DELAY`, 2500 ms) is applied via `audio_set_delay()`, matching the Chromecast's buffering delay.
 
 5. **Interactive control** — A curses-based terminal UI lets you control both players in lockstep.
 
@@ -95,10 +95,10 @@ On PipeWire/PulseAudio systems you can also move the stream to a specific device
 
 The Chromecast's video delay varies depending on your network and the video bitrate. If audio and video drift apart:
 
-- **Audio heard before video** → increase delay (`-d 2500`, `-d 3000`...)
-- **Audio heard after video** → decrease delay (`-d 1500`, `-d 1000`...)
+- **Audio heard before video** → increase delay (`-d 3000`, `-d 3500`...)
+- **Audio heard after video** → decrease delay (`-d 2000`, `-d 1500`...)
 
-Start with the default 2000 ms and adjust in 250–500 ms steps until it feels right.
+Start with the default 2500 ms and adjust in 250–500 ms steps until it feels right.
 
 ## Troubleshooting
 

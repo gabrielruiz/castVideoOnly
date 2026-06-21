@@ -54,18 +54,6 @@ def get_local_ip():
         s.close()
 
 
-def _cleanup_temp_files(max_age_days=30):
-    cutoff = time.time() - max_age_days * 86400
-    tmpdir = tempfile.gettempdir()
-    for p in Path(tmpdir).glob('tmp*.mp4'):
-        try:
-            if p.stat().st_mtime < cutoff:
-                p.unlink()
-                log.info("Cleaned up stale temp file: %s", p.name)
-        except OSError:
-            pass
-
-
 def probe_video(path):
     """Return codec and container info, or None on error."""
     try:
@@ -165,7 +153,7 @@ def detect_encoder():
     ]
 
 
-def build_cast_stream(input_path, output_path, info, stdscr, msg_line, fast=False):
+def build_cast_stream(input_path, output_path, info, stdscr, msg_line, fast=False, start_time=0):
     """Build a Chromecast-compatible file, with silent audio. Shows progress."""
     duration = get_video_duration(input_path)
     do_transcode = needs_transcode(info) and not fast
@@ -173,8 +161,8 @@ def build_cast_stream(input_path, output_path, info, stdscr, msg_line, fast=Fals
     if do_transcode:
         enc_name, enc_opts = detect_encoder()
         action = f"Transcoding ({enc_name})"
-        # Rough estimate: ~5x real-time for 1080p HEVC on this hardware
-        est_min = (duration / 60 / 5) if duration else None
+        remaining = (duration - start_time) if duration else None
+        est_min = (remaining / 60 / 5) if remaining else None
         if est_min and est_min > 2:
             _msg(stdscr, msg_line, f"Estimated: ~{est_min:.0f} min — press Ctrl+C to cancel")
             time.sleep(3)
@@ -188,6 +176,10 @@ def build_cast_stream(input_path, output_path, info, stdscr, msg_line, fast=Fals
     cmd = [
         'ffmpeg', '-y', '-loglevel', 'error',
         '-progress', '-',
+    ]
+    if start_time > 0:
+        cmd += ['-ss', str(start_time)]
+    cmd += [
         '-i', str(input_path),
         '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo',
     ] + enc_opts + [
@@ -304,8 +296,9 @@ class CastController:
         self.mc = self.cast.media_controller
 
     def cast_url(self, url, content_type='video/mp4', current_time=0):
-        self.mc.play_media(url, content_type, current_time=current_time)
+        self.mc.play_media(url, content_type)
         self.mc.block_until_active(timeout=30)
+        # File is already trimmed by ffmpeg (-ss), no seek needed
 
     def reload_at(self, url, content_type, position):
         try:
@@ -313,8 +306,15 @@ class CastController:
         except Exception:
             pass
         time.sleep(0.3)
-        self.mc.play_media(url, content_type, current_time=position)
+        self.mc.play_media(url, content_type)
         self.mc.block_until_active(timeout=15)
+        if position > 0:
+            time.sleep(0.5)
+            try:
+                self.mc.seek(position)
+                time.sleep(0.3)
+            except Exception as e:
+                log.warning("Reload seek to %.1f failed: %s", position, e)
 
     def pause(self):
         try:
@@ -424,8 +424,6 @@ def run(stdscr, args):
         _err(stdscr, f"File not found: {video_path}")
         return _pause_and_quit(stdscr, 1)
 
-    _cleanup_temp_files()
-
     # Probe video info and check Chromecast compatibility
     _msg(stdscr, 0, "Checking video compatibility...")
     info = probe_video(video_path)
@@ -442,11 +440,13 @@ def run(stdscr, args):
     # 1. Build Chromecast-compatible stream (remux or transcode)
     tmp_fd, tmp_path = tempfile.mkstemp(suffix='.mp4')
     os.close(tmp_fd)
+
     try:
-        build_cast_stream(str(video_path), tmp_path, info, stdscr, 0, fast=args.fast)
+        build_cast_stream(str(video_path), tmp_path, info, stdscr, 0, fast=args.fast, start_time=args.time)
     except subprocess.CalledProcessError as e:
         log.error("ffmpeg failed:\n%s", e.stderr.decode(errors='replace') if e.stderr else str(e))
         _err(stdscr, "ffmpeg failed — see cast.log for details")
+        _rm(tmp_path)
         return _pause_and_quit(stdscr, 1)
 
     # 2. Start HTTP server
@@ -458,6 +458,7 @@ def run(stdscr, args):
     except OSError:
         log.error("Port %d is already in use or blocked", HTTP_PORT)
         _err(stdscr, f"Port {HTTP_PORT} is already in use or blocked")
+        _rm(tmp_path)
         return _pause_and_quit(stdscr, 1)
 
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -471,6 +472,7 @@ def run(stdscr, args):
     except RuntimeError as e:
         log.error("Chromecast connection failed: %s", e)
         _err(stdscr, str(e))
+        _rm(tmp_path)
         return _pause_and_quit(stdscr, 1)
 
     # 4. Cast video
@@ -491,6 +493,7 @@ def run(stdscr, args):
     except Exception as e:
         log.error("Failed to cast: %s", e)
         _err(stdscr, f"Failed to cast: {e}")
+        _rm(tmp_path)
         return _pause_and_quit(stdscr, 1)
 
     # 5. Start local audio
@@ -524,10 +527,31 @@ def run(stdscr, args):
         stdscr.addstr(0, 0, f" Chromecast  {format_time(cast_pos)}")
         stdscr.addstr(1, 0, f" Audio       {format_time(max(0, audio_pos))} / {format_time(audio_len)}")
         stdscr.addstr(2, 0, f" Status      {status}")
-        if quitting:
-            stdscr.addstr(3, 0, " Quitting...")
+        delay_label = "Audio Delay  (default)" if args.delay == DEFAULT_DELAY else "Audio Delay"
+        stdscr.addstr(3, 0, f" {delay_label} {args.delay}ms")
 
-        help_y = max(4, h - 5)
+        info_y = 4
+        if local_ip:
+            stdscr.addstr(info_y, 0, f" IP          {local_ip}")
+            info_y += 1
+        if args.name != DEFAULT_NAME:
+            stdscr.addstr(info_y, 0, f" Name        {args.name}")
+            info_y += 1
+        if args.time > 0:
+            stdscr.addstr(info_y, 0, f" Start time  {format_time(args.time)}")
+            info_y += 1
+        if args.fast:
+            stdscr.addstr(info_y, 0, f" Mode        fast remux")
+            info_y += 1
+        if args.software:
+            stdscr.addstr(info_y, 0, f" Mode        software encode")
+            info_y += 1
+
+        if quitting:
+            stdscr.addstr(info_y, 0, " Quitting...")
+            info_y += 1
+
+        help_y = max(info_y + 1, h - 5)
         stdscr.addstr(help_y,     0, " ───────── Controls ─────────")
         stdscr.addstr(help_y + 1, 0, "  Space    pause / resume")
         stdscr.addstr(help_y + 2, 0, "  ← / →    seek  -5s / +5s")
@@ -598,6 +622,14 @@ def _err(stdscr, text):
         stdscr.refresh()
     except curses.error:
         pass
+
+
+def _rm(tmp_path):
+    if tmp_path and os.path.exists(tmp_path):
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def _pause_and_quit(stdscr, code):

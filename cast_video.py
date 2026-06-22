@@ -241,10 +241,11 @@ def guess_mime(path):
 
 def format_time(seconds):
     if seconds is None or seconds < 0:
-        return "0:00"
-    minutes = int(seconds) // 60
+        return "00:00:00"
+    hours = int(seconds) // 3600
+    minutes = (int(seconds) % 3600) // 60
     secs = int(seconds) % 60
-    return f"{minutes}:{secs:02d}"
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 def make_handler(directory):
@@ -498,15 +499,19 @@ def run(stdscr, args):
 
     # 5. Start local audio
     _msg(stdscr, 4, f"Starting audio (delay: {args.delay}ms)...")
-    audio_ctrl = AudioController(str(video_path), args.delay)
+    audio_ctrl = AudioController(str(video_path), args.delay)    
+
+    # Small wait for VLC to init
+    if args.time == 0:
+        time.sleep(0.75)
+    else:
+        time.sleep(0.25)
     audio_ctrl.start()
+
     if args.time > 0:
         audio_ctrl.set_time(args.time)
         _msg(stdscr, 4, f"Seeking audio to {format_time(args.time)}...")
-
-    # Small wait for VLC to init
-    time.sleep(0.5)
-
+    
     _msg(stdscr, 5, "Playing — press q to quit")
     stdscr.refresh()
 

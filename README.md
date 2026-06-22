@@ -146,14 +146,7 @@ Start with the default 2500 ms and adjust in 250–500 ms steps.
 | Seeking jumps to beginning | See TODO below — seek is currently broken. |
 | `Could not detect LAN IP` | Pass `--ip <LAN_IP>` manually (VPN may interfere with auto-detection). |
 
-## TODO
-
-- **Seeking** (`←` / `→`) does not work — the Chromecast ignores the position
-  command and restarts the video from the beginning. Audio seeks correctly.
-  Need a reliable seek mechanism.
-
 ## Logs
-
 All errors (including full ffmpeg output) are logged to **`cast.log`** in the
 project directory. When a failure occurs:
 
@@ -165,6 +158,12 @@ You can also tail the log during a run:
 ```bash
 tail -f cast.log
 ```
+
+## TODO
+
+- **Seeking** (`←` / `→`) does not work — the Chromecast ignores the position
+  command and restarts the video from the beginning. Audio seeks correctly.
+  Need a reliable seek mechanism.
 
 ## Project Structure
 

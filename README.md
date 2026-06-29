@@ -69,7 +69,8 @@ python cast_video.py ~/Videos/movie.mp4 --ip 192.168.0.14
 ## How it works (step by step)
 
 1. **Video probe** — `ffprobe` reads the codec, resolution, and container. Warns
-   if the format isn't natively supported by Chromecast v2.
+   if the format isn't natively supported by Chromecast v2. Also counts audio
+   streams for the multi-audio switching feature.
 
 2. **File preparation** — If the codec isn't H.264/VP8/MPEG-4, `ffmpeg`
    transcodes to H.264 using hardware encoding (VAAPI on Intel iGPU) or
@@ -78,33 +79,51 @@ python cast_video.py ~/Videos/movie.mp4 --ip 192.168.0.14
    percentage is shown. The `+faststart` flag places the moov atom at the
    front so the Chromecast can seek.
 
-3. **Local HTTP server** — A threaded HTTP/1.1 server on port `8800` serves
-   the file with Range-request support (required by Chromecast for seeking).
+3. **Subtitle extraction** — Text-based embedded subtitle tracks (SubRip, ASS,
+   WebVTT) are extracted to WebVTT via `ffmpeg` and shifted by the initial
+   audio delay so they sync with the audio timeline rather than the video.
+   The WebVTT header `X-TIMESTAMP-MAP=MPEGTS:90000,LOCAL:00:00:00.000` is
+   added for Chromecast compatibility.
 
-4. **Chromecast casting** — `pychromecast` discovers the device by name and
-   loads the video URL (`http://<LAN_IP>:8800/tmpXXXXXX.mp4`) via the default
-   media receiver.
+4. **Local HTTP server** — A threaded HTTP/1.1 server on port `8800` serves the
+   file and subtitle files. All responses include `no-cache` headers and CORS.
 
-5. **Local audio playback** — VLC plays the original file in audio-only mode
-   (`--no-video`). The delay is applied via `audio_set_delay()`, matching the
-   Chromecast's buffering delay.
+5. **Chromecast casting** — `pychromecast` discovers the device by name and loads
+   the video URL with subtitle track metadata. Subtitles are initially disabled
+   and enabled only after the local audio has started (avoiding the startup
+   offset where video plays but audio hasn't begun).
 
-6. **Interactive control** — A curses-based terminal UI shows positions and
-   accepts keyboard commands.
+6. **Local audio playback** — VLC plays the original file in audio-only mode
+   (`--no-video`) with `--file-logging` writing to `/tmp/cast_vlc.log`. The
+   delay is applied via `audio_set_delay()`, matching the Chromecast's
+   buffering delay.
+
+7. **Interactive control** — A curses-based terminal UI shows positions, delay,
+   subtitle state, audio track info, and accepts keyboard commands.
 
 ## Interactive Controls
 
 | Key | Action |
 |-----|--------|
 | `Space` | Pause / Resume (both Chromecast + local audio) |
-| `←` | Seek backward 5 seconds **(broken — see TODO)** |
-| `→` | Seek forward 5 seconds **(broken — see TODO)** |
+| `s` | Cycle subtitles: Off → Track 1 → Track 2 → ... → Off (only if subtitles exist) |
+| `a` | Cycle audio tracks (only if the file has multiple audio tracks) |
+| `[` / `]` | Decrease / Increase audio delay by 100 ms (live) |
 | `q` | Stop playback and clean up |
+
+When a subtitle track is active, changing the delay also shifts the subtitle
+timestamps by the same amount so they stay in sync with the audio. Switching
+audio tracks preserves the current delay setting.
 
 The UI displays:
 - Current Chromecast video position
 - Current audio position / total audio length
 - Play/pause status
+- Audio delay in milliseconds
+- LAN IP, custom Chromecast name, start time
+- Encoding mode (fast remux / software / hardware)
+- Active subtitle track name and index
+- Active audio track name and index (when the file has multiple audio tracks)
 
 ## Audio Routing to Bluetooth
 
@@ -123,16 +142,22 @@ The Chromecast's video delay varies depending on your network and bitrate.
 - **Audio heard before video** → increase delay (`-d 3000`, `-d 3500`...)
 - **Audio heard after video** → decrease delay (`-d 2000`, `-d 1500`...)
 
-Start with the default 2500 ms and adjust in 250–500 ms steps.
+You can also adjust the delay live with `[` / `]` while the script is running.
+The display updates instantly and the new delay is applied to both VLC and the
+subtitle offset.
+
+Start with the default 2500 ms and adjust in 250–500 ms steps, then fine-tune
+with 100 ms steps via the keyboard.
 
 ## Notes
 
 - The script names its Chromecast target **"Remoto"** (change with `-n` or edit
   `DEFAULT_NAME` in the script).
-- Temp files in `/tmp/tmp*.mp4` older than 30 days are automatically cleaned
-  on each run.
+- Temp files in `/tmp/tmp*/` are cleaned up on exit.
 - When the script exits, it tells the Chromecast to quit the receiver app,
-  stops VLC, shuts down the HTTP server, and deletes the temp file.
+  stops VLC, shuts down the HTTP server, and deletes the temp directory.
+- Image-based subtitle tracks (PGS, DVDSUB) are skipped — only text tracks
+  are extracted.
 
 ## Troubleshooting
 
@@ -142,28 +167,31 @@ Start with the default 2500 ms and adjust in 250–500 ms steps.
 | `Port 8800 is already in use` | Kill the process using that port. |
 | `ffmpeg failed` | Ensure `ffmpeg` is installed (`ffmpeg -version`). |
 | Black screen on Chromecast | The file may not be compatible. Try `--software` or `--fast`. If on a VPN, pass `--ip <LAN_IP>`. |
-| Audio out of sync | Adjust with `-d`. Default is 2500 ms. |
-| Seeking jumps to beginning | See TODO below — seek is currently broken. |
+| Audio out of sync | Adjust with `[`/`]` live, or set a different default with `-d`. |
+| Seeking jumps to beginning | Seek is currently broken (Chromecast ignores the position command). |
 | `Could not detect LAN IP` | Pass `--ip <LAN_IP>` manually (VPN may interfere with auto-detection). |
+| Subtitles not showing | Only text tracks (SubRip, ASS, WebVTT) are supported; image-based (PGS/DVDSUB) are skipped. |
 
 ## Logs
-All errors (including full ffmpeg output) are logged to **`cast.log`** in the
-project directory. When a failure occurs:
+
+All errors are logged to **`cast.log`** in the project directory. VLC
+diagnostics are written to **`/tmp/cast_vlc.log`**. When a failure occurs:
 
 1. The terminal shows a brief error and "Press any key to exit"
 2. The full error details are in `cast.log`
 3. After exiting, the script prints the log path
 
-You can also tail the log during a run:
+You can also tail the logs during a run:
 ```bash
 tail -f cast.log
+tail -f /tmp/cast_vlc.log
 ```
 
 ## TODO
 
 - **Seeking** (`←` / `→`) does not work — the Chromecast ignores the position
   command and restarts the video from the beginning. Audio seeks correctly.
-  Need a reliable seek mechanism.
+  Need a reliable seek mechanism (e.g., trim a new temp file via ffmpeg `-ss`).
 
 ## Project Structure
 
